@@ -1,166 +1,174 @@
 """
-The Price Is Not Random - Dynamic Pricing Demo
-Tech Talk Tuesday | Team demo
-
-Install once:  pip install numpy pandas scikit-learn matplotlib
-Run:           python dynamic_pricing_demo.py
+Dynamic Pricing Engine & Ethical Fare System
+Author: Manushka
+Project: Algorithmic Pricing with Fair Surge Caps
 """
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import r2_score
+from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
 
+# ==========================================
+# 1. GENERATE DATASET
+# ==========================================
 np.random.seed(42)
+TOTAL_RIDES = 20000
 
-BASE_FARE = 30  # Rs, fixed booking fee
-PER_KM = 12  # Rs per km
+rain_mm = np.random.exponential(scale=2.5, size=TOTAL_RIDES)
+traffic_index = np.random.uniform(0.1, 1.0, size=TOTAL_RIDES)
+hour_of_day = np.random.randint(0, 24, size=TOTAL_RIDES)
+ride_requests = np.random.poisson(lam=90, size=TOTAL_RIDES)
+available_cabs = np.clip(
+    np.random.poisson(lam=50, size=TOTAL_RIDES), a_min=5, a_max=None
+)
+
+# Market surge formula
+demand_supply_ratio = ride_requests / available_cabs
+peak_hours = ((hour_of_day >= 8) & (hour_of_day <= 10)) | (
+    (hour_of_day >= 17) & (hour_of_day <= 20)
+)
+
+calculated_surge = (
+    1.0
+    + 0.40 * np.maximum(0, demand_supply_ratio - 1.0)
+    + 0.30 * traffic_index
+    + 0.15 * (rain_mm > 5.0)
+    + 0.15 * peak_hours
+)
+surge_multiplier = np.clip(calculated_surge, a_min=1.0, a_max=3.5)
+
+data = pd.DataFrame(
+    {
+        "rain_mm": rain_mm,
+        "traffic_index": traffic_index,
+        "hour_of_day": hour_of_day,
+        "ride_requests": ride_requests,
+        "available_cabs": available_cabs,
+        "surge_multiplier": surge_multiplier,
+    }
+)
+
+print("Dataset created successfully!")
+print(data.head())
+
+# ==========================================
+# 2. TRAIN THE MACHINE LEARNING MODEL
+# ==========================================
+X = data[["rain_mm", "traffic_index", "hour_of_day", "ride_requests", "available_cabs"]]
+y = data["surge_multiplier"]
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+print("\nTraining the Gradient Boosting model...")
+model = HistGradientBoostingRegressor(max_iter=100, random_state=42)
+model.fit(X_train, y_train)
+
+predictions = model.predict(X_test)
+mse = mean_squared_error(y_test, predictions)
+r2 = r2_score(y_test, predictions)
+
+print("Model Training Complete!")
+print(f"Mean Squared Error (MSE): {mse:.4f}")
+print(f"R² Score: {r2:.4f}")
+
+# ==========================================
+# 3. PRICING & ETHICAL CAP LOGIC
+# ==========================================
+BASE_FARE = 125  # Base price in INR (₹)
+MAX_SURGE_CAP = 1.5  # Maximum fair surge multiplier (1.5x)
 
 
-# ---------------------------------------------------------------
-# STEP 1: Make fake ride data (the "real world" the AI learns from)
-# ---------------------------------------------------------------
-def true_surge(hour, rain, weekend, event):
-    """Hidden rule of the world. The AI must DISCOVER this from data."""
-    surge = 1.0
-    if hour in (8, 9, 18, 19, 20):  # office rush hours
-        surge += 0.5
-    if hour >= 22 or hour <= 4:  # late night
-        surge += 0.3
-    if rain:
-        surge += 0.6
-    if weekend and 19 <= hour <= 23:  # weekend nights
-        surge += 0.3
-    if event:  # exam day / concert / match
-        surge += 0.4
-    return surge
-
-
-def make_data(n=20000):
-    rows = []
-    for _ in range(n):
-        km = np.random.uniform(1, 25)
-        hour = np.random.randint(0, 24)
-        rain = np.random.rand() < 0.2
-        weekend = np.random.rand() < 0.3
-        event = np.random.rand() < 0.1
-        price = (BASE_FARE + PER_KM * km) * true_surge(hour, rain, weekend, event)
-        price += np.random.normal(0, 8)  # real-world noise
-        rows.append([km, hour, int(rain), int(weekend), int(event), price])
-    return pd.DataFrame(
-        rows, columns=["km", "hour", "rain", "weekend", "event", "price"]
+def calculate_ride_fare(rain, traffic, hour, requests, cabs):
+    input_data = pd.DataFrame(
+        [[rain, traffic, hour, requests, cabs]],
+        columns=[
+            "rain_mm",
+            "traffic_index",
+            "hour_of_day",
+            "ride_requests",
+            "available_cabs",
+        ],
     )
 
+    predicted_surge = float(model.predict(input_data)[0])
+    predicted_surge = max(1.0, round(predicted_surge, 2))
 
-# ---------------------------------------------------------------
-# STEP 2: Train the AI model
-# ---------------------------------------------------------------
-def train_model():
-    df = make_data()
-    X = df[["km", "hour", "rain", "weekend", "event"]]
-    y = df["price"]
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=1
+    uncapped_fare = round(BASE_FARE * predicted_surge)
+    uncapped_driver_earning = round(uncapped_fare * 0.75)
+
+    is_capped = predicted_surge > MAX_SURGE_CAP
+    fair_surge = MAX_SURGE_CAP if is_capped else predicted_surge
+    fair_fare = round(BASE_FARE * fair_surge)
+
+    commission_rate = 0.05 if is_capped else 0.25
+    fair_driver_earning = round(fair_fare * (1 - commission_rate))
+
+    user_savings = uncapped_fare - fair_fare
+
+    return {
+        "uncapped_surge": predicted_surge,
+        "uncapped_fare": uncapped_fare,
+        "uncapped_driver": uncapped_driver_earning,
+        "fair_surge": fair_surge,
+        "fair_fare": fair_fare,
+        "fair_driver": fair_driver_earning,
+        "savings": user_savings,
+        "capped_triggered": is_capped,
+    }
+
+
+def display_fare_summary(title, rain, traffic, hour, requests, cabs):
+    result = calculate_ride_fare(rain, traffic, hour, requests, cabs)
+
+    print("\n" + "=" * 50)
+    print(f"Ride Scenario: {title}")
+    print(
+        f"Inputs -> Rain: {rain}mm | Congestion: {traffic:.2f} | Dem/Supp: {requests}/{cabs}"
     )
-    model = RandomForestRegressor(n_estimators=150, random_state=1)
-    model.fit(X_train, y_train)
-    score = r2_score(y_test, model.predict(X_test))
-    return model, score, X.columns.tolist()
-
-
-# ---------------------------------------------------------------
-# STEP 3: Live demo functions
-# ---------------------------------------------------------------
-def predict_price(model, km, hour, rain, weekend, event):
-    row = pd.DataFrame(
-        [[km, hour, rain, weekend, event]],
-        columns=["km", "hour", "rain", "weekend", "event"],
+    print("-" * 50)
+    print(
+        f"Original Market Surge : {result['uncapped_surge']}x  --> Total Fare: ₹{result['uncapped_fare']}"
     )
-    return float(model.predict(row)[0])
-
-
-def ask_yes_no(question):
-    return 1 if input(question + " (y/n): ").strip().lower() == "y" else 0
-
-
-def live_demo(model):
-    print("\n--- Book a cab ---")
-    km = float(input("Distance in km (e.g. 8): "))
-    hour = int(input("Hour of day, 0-23 (e.g. 19 for 7 PM): "))
-    rain = ask_yes_no("Is it raining?")
-    weekend = ask_yes_no("Is it a weekend?")
-    event = ask_yes_no("Exam day / concert / match nearby?")
-
-    normal = predict_price(model, km, 14, 0, 0, 0)  # calm 2 PM, dry, weekday
-    price = predict_price(model, km, hour, rain, weekend, event)
-    multiplier = price / normal
-
-    print("\n==============================")
-    print(f"Normal price (calm day): Rs {normal:.0f}")
-    print(f"YOUR price right now   : Rs {price:.0f}")
-    print(f"Surge multiplier       : {multiplier:.2f}x")
-    print("==============================")
-    if multiplier > 1.4:
-        print("High surge! The AI sees high demand and raises the price.")
-    elif multiplier > 1.1:
-        print("Mild surge.")
+    print(f"Original Driver Payout: ₹{result['uncapped_driver']} (Platform takes 25%)")
+    print("-" * 50)
+    print(
+        f"Regulated Fair Surge  : {result['fair_surge']}x  --> Total Fare: ₹{result['fair_fare']}"
+    )
+    print(f"Regulated Driver Cut  : ₹{result['fair_driver']} (Platform subsidizes fee)")
+    if result["capped_triggered"]:
+        print(
+            f"Ethical Guardrail     : Capped at {MAX_SURGE_CAP}x (Passenger saved ₹{result['savings']}!)"
+        )
     else:
-        print("No surge. Good time to travel!")
+        print("Ethical Guardrail     : Normal market pricing (No cap needed)")
+    print("=" * 50)
 
 
-def show_chart(model):
-    import matplotlib.pyplot as plt
-
-    hours = list(range(24))
-    dry = [predict_price(model, 8, h, 0, 0, 0) for h in hours]
-    wet = [predict_price(model, 8, h, 1, 0, 0) for h in hours]
-
-    plt.figure(figsize=(10, 5))
-    plt.plot(hours, dry, marker="o", label="Dry day")
-    plt.plot(hours, wet, marker="o", label="Rainy day")
-    plt.title("Price of an 8 km ride through the day (AI prediction)")
-    plt.xlabel("Hour of day")
-    plt.ylabel("Price (Rs)")
-    plt.xticks(hours)
-    plt.legend()
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-    plt.savefig("price_chart.png", dpi=150)
-    print("Chart saved as price_chart.png")
-    plt.show()
-
-
-def what_matters(model, features):
-    print("\n--- What did the AI learn matters most? ---")
-    pairs = sorted(zip(features, model.feature_importances_), key=lambda x: -x[1])
-    for name, imp in pairs:
-        print(f"{name:8s} {'#' * int(imp * 50)} {imp * 100:.0f}%")
-
-
-# ---------------------------------------------------------------
-# MAIN MENU
-# ---------------------------------------------------------------
-def main():
-    print("Training the AI on 20,000 fake rides...")
-    model, score, features = train_model()
-    print(f"Done! Model accuracy (R2 score): {score:.2f}")
-
-    while True:
-        print("\n1) Book a cab (live demo)")
-        print("2) Show price-vs-hour chart")
-        print("3) What does the AI think matters?")
-        print("4) Quit")
-        choice = input("Choose: ").strip()
-        if choice == "1":
-            live_demo(model)
-        elif choice == "2":
-            show_chart(model)
-        elif choice == "3":
-            what_matters(model, features)
-        elif choice == "4":
-            break
-
-
+# ==========================================
+# 4. RUN TEST SCENARIOS & INTERACTIVE PROMPT
+# ==========================================
 if __name__ == "__main__":
-    main()
+    display_fare_summary(
+        "Normal Afternoon", rain=0.0, traffic=0.2, hour=14, requests=45, cabs=50
+    )
+    display_fare_summary(
+        "Monsoon Evening Rush", rain=15.0, traffic=0.85, hour=19, requests=180, cabs=40
+    )
+
+    print("\n--- Try It Yourself ---")
+    try:
+        r = float(input("Enter rainfall in mm (e.g. 10): "))
+        t = float(input("Enter traffic index between 0.1 and 1.0 (e.g. 0.8): "))
+        h = int(input("Enter current hour (0-23): "))
+        req = int(input("Enter active ride requests (e.g. 150): "))
+        cab = int(input("Enter available cabs (e.g. 35): "))
+
+        display_fare_summary(
+            "Custom Live Test", rain=r, traffic=t, hour=h, requests=req, cabs=cab
+        )
+    except ValueError:
+        print("Invalid input entered. Demo finished.")
